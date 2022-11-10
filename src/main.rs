@@ -25,11 +25,13 @@ mod app {
     use super::*;
 
     #[shared]
-    struct Shared {}
+    struct Shared {
+        led: PE10<Output<PushPull>>,
+    }
 
     #[local]
     struct Local {
-        led: PE10<Output<PushPull>>,
+        button: hal::gpio::Pin<hal::gpio::Gpioa, hal::gpio::U<0>, hal::gpio::Input>,
         state: bool,
         magnetometer_sensor: lsm303dlhc::Lsm303dlhc<
             hal::i2c::I2c<
@@ -77,7 +79,7 @@ mod app {
     type MonoTimer = Systick<1000>;
 
     #[init]
-    fn init(cx: init::Context) -> (Shared, Local, init::Monotonics) {
+    fn init(mut cx: init::Context) -> (Shared, Local, init::Monotonics) {
         // Setup clocks
         let mut flash = cx.device.FLASH.constrain();
         let mut rcc = cx.device.RCC.constrain();
@@ -93,6 +95,15 @@ mod app {
             .sysclk(36.MHz())
             .pclk1(36.MHz())
             .freeze(&mut flash.acr);
+
+        let mut gpioa = cx.device.GPIOA.split(&mut rcc.ahb);
+
+        // Enable interrupts on button press
+        let mut button = gpioa
+            .pa0
+            .into_pull_down_input(&mut gpioa.moder, &mut gpioa.pupdr);
+        button.trigger_on_edge(&mut cx.device.EXTI, hal::gpio::Edge::Rising);
+        button.enable_interrupt(&mut cx.device.EXTI);
 
         // Setup LED
         let mut gpioe = cx.device.GPIOE.split(&mut rcc.ahb);
@@ -121,7 +132,6 @@ mod app {
         );
         let magnetometer_sensor = Lsm303dlhc::new(i2c).unwrap();
 
-        let mut gpioa = cx.device.GPIOA.split(&mut rcc.ahb);
         let sck =
             gpioa
                 .pa5
@@ -154,9 +164,9 @@ mod app {
         gyroscope::spawn_after(Duration::<u64, 1, 1000>::from_ticks(1000)).unwrap();
 
         (
-            Shared {},
+            Shared { led },
             Local {
-                led,
+                button,
                 state: false,
                 magnetometer_sensor,
                 gyroscope_sensor,
@@ -165,17 +175,35 @@ mod app {
         )
     }
 
-    #[task(local = [led, state])]
+    #[task(priority = 3, binds = EXTI0, local=[button], shared=[led])]
+    fn button_press(mut cx: button_press::Context) {
+        // https://lonesometraveler.github.io/2020/04/17/GPIO_interrupt.html
+        // https://apollolabsblog.hashnode.dev/stm32f4-embedded-rust-at-the-hal-gpio-interrupts
+        cx.local.button.clear_interrupt();
+        cx.shared.led.lock(|led| {
+            led.toggle().unwrap();
+        });
+        // let on = cx.local.button.is_high().unwrap();
+        // cx.shared.led.lock(|led| {
+        //     if on {
+        //         (*led).set_high().unwrap();
+        //     } else {
+        //         (*led).set_low().unwrap();
+        //     }
+        // })
+    }
+
+    #[task(local = [state], shared = [led])]
     fn blink(cx: blink::Context) {
         rprintln!("blink");
-        if *cx.local.state {
-            cx.local.led.set_high().unwrap();
-            *cx.local.state = false;
-        } else {
-            cx.local.led.set_low().unwrap();
-            *cx.local.state = true;
-        }
-        blink::spawn_after(Duration::<u64, 1, 1000>::from_ticks(1000)).unwrap();
+        // if *cx.local.state {
+        //     cx.local.led.set_high().unwrap();
+        //     *cx.local.state = false;
+        // } else {
+        //     cx.local.led.set_low().unwrap();
+        //     *cx.local.state = true;
+        // }
+        // blink::spawn_after(Duration::<u64, 1, 1000>::from_ticks(1000)).unwrap();
     }
 
     #[task(local = [magnetometer_sensor])]
@@ -188,7 +216,7 @@ mod app {
     #[task(local = [gyroscope_sensor])]
     fn gyroscope(cx: gyroscope::Context) {
         let l3gd20::I16x3 { x, y, z } = cx.local.gyroscope_sensor.gyro().unwrap();
-        hprintln!("{} {} {}", x, y, z);
+        // hprintln!("{} {} {}", x, y, z);
         gyroscope::spawn_after(Duration::<u64, 1, 1000>::from_ticks(1000)).unwrap();
     }
 }
